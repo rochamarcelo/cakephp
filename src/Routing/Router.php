@@ -48,14 +48,6 @@ class Router
     protected static $_defaultRouteClass = Route\Route::class;
 
     /**
-     * Contains the base string that will be applied to all generated URLs
-     * For example `https://example.com`
-     *
-     * @var string|null
-     */
-    protected static $_fullBaseUrl;
-
-    /**
      * Regular expression for action names
      *
      * @var string
@@ -105,11 +97,11 @@ class Router
     protected static $_collection;
 
     /**
-     * A hash of request context data.
+     * A route context to help on the creation of urls.
      *
-     * @var array
+     * @var \Cake\Routing\RouteContext|null
      */
-    protected static $_requestContext = [];
+    protected static $_routeContext;
 
     /**
      * Named expressions
@@ -241,16 +233,10 @@ class Router
     public static function setRequest(ServerRequest $request): void
     {
         static::$_request = $request;
-
-        static::$_requestContext['_base'] = $request->getAttribute('base');
-        static::$_requestContext['params'] = $request->getAttribute('params', []);
-
-        $uri = $request->getUri();
-        static::$_requestContext += [
-            '_scheme' => $uri->getScheme(),
-            '_host' => $uri->getHost(),
-            '_port' => $uri->getPort(),
-        ];
+        if (static::$_routeContext === null) {
+            static::$_routeContext = new RouteContext([]);
+        }
+        static::$_routeContext->setRequest($request);
     }
 
     /**
@@ -416,114 +402,11 @@ class Router
      */
     public static function url($url = null, bool $full = false): string
     {
-        $context = static::$_requestContext;
-        $request = static::getRequest();
-
-        $context['_base'] = $context['_base'] ?? Configure::read('App.base') ?: '';
-
-        if (empty($url)) {
-            $here = $request ? $request->getRequestTarget() : '/';
-            $output = $context['_base'] . $here;
-            if ($full) {
-                $output = static::fullBaseUrl() . $output;
-            }
-
-            return $output;
+        if (static::$_routeContext === null) {
+            static::$_routeContext = new RouteContext([]);
         }
 
-        $params = [
-            'plugin' => null,
-            'controller' => null,
-            'action' => 'index',
-            '_ext' => null,
-        ];
-        if (!empty($context['params'])) {
-            $params = $context['params'];
-        }
-
-        $frag = '';
-
-        if (is_array($url)) {
-            if (isset($url['_path'])) {
-                $url = self::unwrapShortString($url);
-            }
-
-            if (isset($url['_ssl'])) {
-                $url['_scheme'] = $url['_ssl'] === true ? 'https' : 'http';
-            }
-
-            if (isset($url['_full']) && $url['_full'] === true) {
-                $full = true;
-            }
-            if (isset($url['#'])) {
-                $frag = '#' . $url['#'];
-            }
-            unset($url['_ssl'], $url['_full'], $url['#']);
-
-            $url = static::_applyUrlFilters($url);
-
-            if (!isset($url['_name'])) {
-                // Copy the current action if the controller is the current one.
-                if (
-                    empty($url['action']) &&
-                    (
-                        empty($url['controller']) ||
-                        $params['controller'] === $url['controller']
-                    )
-                ) {
-                    $url['action'] = $params['action'];
-                }
-
-                // Keep the current prefix around if none set.
-                if (isset($params['prefix']) && !isset($url['prefix'])) {
-                    $url['prefix'] = $params['prefix'];
-                }
-
-                $url += [
-                    'plugin' => $params['plugin'],
-                    'controller' => $params['controller'],
-                    'action' => 'index',
-                    '_ext' => null,
-                ];
-            }
-
-            // If a full URL is requested with a scheme the host should default
-            // to App.fullBaseUrl to avoid corrupt URLs
-            if ($full && isset($url['_scheme']) && !isset($url['_host'])) {
-                $url['_host'] = $context['_host'];
-            }
-            $context['params'] = $params;
-
-            $output = static::$_collection->match($url, $context);
-        } else {
-            $url = (string)$url;
-
-            $plainString = (
-                strpos($url, 'javascript:') === 0 ||
-                strpos($url, 'mailto:') === 0 ||
-                strpos($url, 'tel:') === 0 ||
-                strpos($url, 'sms:') === 0 ||
-                strpos($url, '#') === 0 ||
-                strpos($url, '?') === 0 ||
-                strpos($url, '//') === 0 ||
-                strpos($url, '://') !== false
-            );
-
-            if ($plainString) {
-                return $url;
-            }
-            $output = $context['_base'] . $url;
-        }
-
-        $protocol = preg_match('#^[a-z][a-z0-9+\-.]*\://#i', $output);
-        if ($protocol === 0) {
-            $output = str_replace('//', '/', '/' . $output);
-            if ($full) {
-                $output = static::fullBaseUrl() . $output;
-            }
-        }
-
-        return $output . $frag;
+        return static::$_routeContext->buildUrl($url, $full);
     }
 
     /**
@@ -591,43 +474,11 @@ class Router
      */
     public static function fullBaseUrl(?string $base = null): string
     {
-        if ($base === null && static::$_fullBaseUrl !== null) {
-            return static::$_fullBaseUrl;
+        if (static::$_routeContext === null) {
+            static::$_routeContext = new RouteContext([]);
         }
 
-        if ($base !== null) {
-            static::$_fullBaseUrl = $base;
-            Configure::write('App.fullBaseUrl', $base);
-        } else {
-            $base = (string)Configure::read('App.fullBaseUrl');
-
-            // If App.fullBaseUrl is empty but context is set from request through setRequest()
-            if (!$base && !empty(static::$_requestContext['_host'])) {
-                $base = sprintf(
-                    '%s://%s',
-                    static::$_requestContext['_scheme'],
-                    static::$_requestContext['_host']
-                );
-                if (!empty(static::$_requestContext['_port'])) {
-                    $base .= ':' . static::$_requestContext['_port'];
-                }
-
-                Configure::write('App.fullBaseUrl', $base);
-
-                return static::$_fullBaseUrl = $base;
-            }
-
-            static::$_fullBaseUrl = $base;
-        }
-
-        $parts = parse_url(static::$_fullBaseUrl);
-        static::$_requestContext = [
-            '_scheme' => $parts['scheme'] ?? null,
-            '_host' => $parts['host'] ?? null,
-            '_port' => $parts['port'] ?? null,
-        ] + static::$_requestContext;
-
-        return static::$_fullBaseUrl;
+        return static::$_routeContext->fullBaseUrl($base);
     }
 
     /**
@@ -1029,5 +880,13 @@ class Router
         static::$_routePaths[$url] = $defaults;
 
         return $defaults;
+    }
+
+    /**
+     * @return callable[]
+     */
+    public static function getUrlFilters(): array
+    {
+        return self::$_urlFilters;
     }
 }
